@@ -1,10 +1,4 @@
-#include <stddef.h>
-#include <stdint.h>
-#include <dlpack/dlpack.h>
-// const size_t output_data_len = 10;
-// float output_data[] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, };
+// Sine model output: 1 float
 
-const size_t output_data_len = 1;
-float output_data[1]; //  = { 1.23, };
-
-
+#define OUTPUT_DATA_LEN 1
+float output_data[OUTPUT_DATA_LEN];

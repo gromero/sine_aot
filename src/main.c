@@ -23,44 +23,29 @@
 #include <power/reboot.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
+#include <zephyr.h>
+
 #include <tvm/runtime/c_runtime_api.h>
 #include <tvm/runtime/crt/logging.h>
 #include <tvm/runtime/crt/stack_allocator.h>
-#include <unistd.h>
-#include <zephyr.h>
 
 #include "input_data.h"
 #include "output_data.h"
 #include "tvmgen_default.h"
+
 #include "zephyr_uart.h"
-#include "tvmgen_default.h"
 
 #ifdef CONFIG_ARCH_POSIX
 #include "posix_board_if.h"
 #endif
 
-// WORKSPACE_SIZE defined in Project API Makefile
-
+// Memory footprint for running the inference model
 #define WORKSPACE_SIZE TVMGEN_DEFAULT_WORKSPACE_SIZE
-
 static uint8_t g_aot_memory[WORKSPACE_SIZE];
 tvm_workspace_t app_workspace;
 
-// Transport Commands.
-// Commands on host end with `\n`
-// Commands on microTVM device end with `%`
-const unsigned char CMD_WAKEUP[] = "wakeup\n";
-const unsigned char CMD_READY[] = "ready\n";
-const unsigned char CMD_INIT[] = "init";
-const unsigned char CMD_INFER[] = "infer";
-
-#define CMD_SIZE 80u
-#define CMD_TERMINATOR '%'
-
-size_t TVMPlatformFormatMessage(char* out_buf, size_t out_buf_size_bytes, const char* fmt,
-                                va_list args) {
-  return vsnprintk(out_buf, out_buf_size_bytes, fmt, args);
-}
+static uint8_t rx_buffer[128];
 
 void TVMLogf(const char* msg, ...) {
   char buffer[256];
@@ -75,8 +60,9 @@ void TVMLogf(const char* msg, ...) {
 void TVMPlatformAbort(tvm_crt_error_t error) {
   TVMLogf("TVMPlatformAbort: %08x\n", error);
   sys_reboot(SYS_REBOOT_COLD);
-  for (;;)
-    ;
+
+  // Halt
+  while(true);
 }
 
 tvm_crt_error_t TVMPlatformMemoryAllocate(size_t num_bytes, DLDevice dev, void** out_ptr) {
@@ -87,70 +73,14 @@ tvm_crt_error_t TVMPlatformMemoryFree(void* ptr, DLDevice dev) {
   return StackMemoryManager_Free(&app_workspace, ptr);
 }
 
-void timer_expiry_function(struct k_timer* timer_id) { return; }
-
-#define MILLIS_TIL_EXPIRY 200
-#define TIME_TIL_EXPIRY (K_MSEC(MILLIS_TIL_EXPIRY))
-struct k_timer g_microtvm_timer;
-uint32_t g_microtvm_start_time;
-int g_microtvm_timer_running = 0;
-
-// Called to start system timer.
-tvm_crt_error_t TVMPlatformTimerStart() {
-  if (g_microtvm_timer_running) {
-    TVMLogf("timer already running");
-    return kTvmErrorPlatformTimerBadState;
-  }
-
-  k_timer_start(&g_microtvm_timer, TIME_TIL_EXPIRY, TIME_TIL_EXPIRY);
-  g_microtvm_start_time = k_cycle_get_32();
-  g_microtvm_timer_running = 1;
-  return kTvmErrorNoError;
-}
-
-// Called to stop system timer.
-tvm_crt_error_t TVMPlatformTimerStop(double* elapsed_time_seconds) {
-  if (!g_microtvm_timer_running) {
-    TVMLogf("timer not running");
-    return kTvmErrorSystemErrorMask | 2;
-  }
-
-  uint32_t stop_time = k_cycle_get_32();
-
-  // compute how long the work took
-  uint32_t cycles_spent = stop_time - g_microtvm_start_time;
-  if (stop_time < g_microtvm_start_time) {
-    // we rolled over *at least* once, so correct the rollover it was *only*
-    // once, because we might still use this result
-    cycles_spent = ~((uint32_t)0) - (g_microtvm_start_time - stop_time);
-  }
-
-  uint32_t ns_spent = (uint32_t)k_cyc_to_ns_floor64(cycles_spent);
-  double hw_clock_res_us = ns_spent / 1000.0;
-
-  // need to grab time remaining *before* stopping. when stopped, this function
-  // always returns 0.
-  int32_t time_remaining_ms = k_timer_remaining_get(&g_microtvm_timer);
-  k_timer_stop(&g_microtvm_timer);
-  // check *after* stopping to prevent extra expiries on the happy path
-  if (time_remaining_ms < 0) {
-    return kTvmErrorSystemErrorMask | 3;
-  }
-  uint32_t num_expiries = k_timer_status_get(&g_microtvm_timer);
-  uint32_t timer_res_ms = ((num_expiries * MILLIS_TIL_EXPIRY) + time_remaining_ms);
-  double approx_num_cycles =
-      (double)k_ticks_to_cyc_floor32(1) * (double)k_ms_to_ticks_ceil32(timer_res_ms);
-  // if we approach the limits of the HW clock datatype (uint32_t), use the
-  // coarse-grained timer result instead
-  if (approx_num_cycles > (0.5 * (~((uint32_t)0)))) {
-    *elapsed_time_seconds = timer_res_ms / 1000.0;
-  } else {
-    *elapsed_time_seconds = hw_clock_res_us / 1e6;
-  }
-
-  g_microtvm_timer_running = 0;
-  return kTvmErrorNoError;
-}
+/*
+ * Both TVMBackendAllocWorkspace() and TVMBackendFreeWorkspace() below need to
+ * be implemented in TF-M since tvmgen_default_run_model() relies on it. For
+ * that TVMPlatformMemoryAllocate() and TVMPlatformMemoryFree(), which are
+ * platform-specific, need to be implemented in TF-M.
+ * TVMPlatformMemoryAllocate() and TVMPlatformMemoryFree() (above) are part of
+ * TVM C Runtime (crt/include/tvm/runtime/crt/stack_allocator.h).
+ */
 
 void* TVMBackendAllocWorkspace(int device_type, int device_id, uint64_t nbytes, int dtype_code_hint,
                                int dtype_bits_hint) {
@@ -172,112 +102,48 @@ int TVMBackendFreeWorkspace(int device_type, int device_id, void* ptr) {
   return err;
 }
 
-static uint8_t main_rx_buf[128];
-static uint8_t g_cmd_buf[128];
-static size_t g_cmd_buf_ind;
-
-void TVMInfer() {
-  struct tvmgen_default_inputs inputs = {
-      .dense_4_input = input_data,
-  };
-  struct tvmgen_default_outputs outputs = {
-      .output = output_data,
-  };
+void do_inference() {
+  int ret_val, i, num_chars;
+  char printf_buffer[64];
 
   StackMemoryManager_Init(&app_workspace, g_aot_memory, WORKSPACE_SIZE);
 
-  // TVMLogf("Infering...");
-
-  double elapsed_time = 0;
-  char b[128];
-  int s;
-  TVMPlatformTimerStart();
-  // int ret_val = tvmgen_default_run_model(&inputs, &outputs);
-  //output_data[0] = 1.1;
-  // s = sprintf(b, "%f\n", output_data[0]);
-  // TVMPlatformWriteSerial(b, s);
-  int ret_val = tvmgen_default_run_model(input_data, output_data);
-  TVMPlatformTimerStop(&elapsed_time);
-  s = sprintf(b, "%f, %f ms\r\n", output_data[0], (elapsed_time * 1000));
-  TVMPlatformWriteSerial(b, s);
+  // tvmgen_default_run_model() is automatically generated by TVM
+  // Please see README.md for details on how to generate it using
+  // 'tvmc compile' command.
+  //
+  // input_data is defined in input_data.h
+  // output_data is defined in output_data.h
+  // Both input_data and output_data must be manually set to match
+  // the input/output tensor shapes for the compiled model using
+  // 'tvmc compile' (sine model in this case).
+  //
+  ret_val = tvmgen_default_run_model(input_data, output_data); // <================= HERE WE CALL THE INFERENCE MODEL
 
   if (ret_val != 0) {
     TVMLogf("Error: %d\n", ret_val);
     TVMPlatformAbort(kTvmErrorPlatformCheckFailure);
   }
 
-  size_t max_ind = -1;
-  float max_val = -FLT_MAX;
-  for (size_t i = 0; i < output_data_len; i++) {
-    if (output_data[i] >= max_val) {
-      max_ind = i;
-      max_val = output_data[i];
-    }
-  }
-  // TVMLogf("output: %d, max_ind: %d, max_val: %f\r\n", output_data[0], max_ind, max_val);
-  // TVMLogf("max_ind: %d, max_val: %d\r\n", max_ind, max_val);
-  // TVMLogf("result:%f:%f\r\n", max_ind, elapsed_time * 1000));
-}
-
-// Execute functions based on received command
-void command_ready(char* command) {
-  if (strncmp(command, CMD_INIT, CMD_SIZE) == 0) {
-    TVMPlatformWriteSerial(CMD_WAKEUP, sizeof(CMD_WAKEUP));
-  } else if (strncmp(command, CMD_INFER, CMD_SIZE) == 0) {
-    TVMInfer();
-  } else {
-    TVMPlatformWriteSerial(CMD_READY, sizeof(CMD_READY));
+  // Print output_data[]
+  for (i = 0; i < OUTPUT_DATA_LEN; i++) {
+    num_chars = sprintf(printf_buffer, "output_data[%d]: %f\r\n", i, output_data[i]);
+    TVMPlatformWriteSerial(printf_buffer, num_chars);
   }
 }
-
-// Append received characters to buffer and check for termination character.
-void serial_callback(char* message, int len_bytes) {
-  for (int i = 0; i < len_bytes; i++) {
-    if (message[i] == CMD_TERMINATOR) {
-      g_cmd_buf[g_cmd_buf_ind] = (char)0;
-      command_ready(g_cmd_buf);
-      g_cmd_buf_ind = 0;
-    } else {
-      g_cmd_buf[g_cmd_buf_ind] = message[i];
-      g_cmd_buf_ind += 1;
-    }
-  }
-}
-
 
 
 void main(void) {
-  float v = 1.23;
-  
-  char b[] = "xxxxxxxxxxxxxxxx";
-  int s;
-  g_cmd_buf_ind = 0;
-  memset((char*)g_cmd_buf, 0, sizeof(g_cmd_buf));
+  // Just initialize Zephyr's UART device
   TVMPlatformUARTInit();
-  k_timer_init(&g_microtvm_timer, NULL, NULL);
-  TVMLogf("Hit 'X' to do inference:\r\n");
-  // s = sprintf(b, "%f\r\n", v);
-  TVMPlatformWriteSerial(b, s);
-  // TVMLogf("Y\n");
-  // TVMLogf("%f\n", v);
   
+  TVMLogf("Hit 'X' to do inference:\r\n");
   while (true) {
-    int bytes_read = TVMPlatformUartRxRead(main_rx_buf, sizeof(main_rx_buf));
+    int bytes_read = TVMPlatformUartRxRead(rx_buffer, sizeof(rx_buffer));
     if (bytes_read > 0) {
-      if (main_rx_buf[0] == 'X') {
-        TVMLogf("Calling TVMInfer()...\r\n");
-        TVMInfer();
+      if (rx_buffer[0] == 'X') {
+        do_inference();
       }
     }
   }
-
-
-/*
-  while (true) {
-      TVMInfer();
-  }
-*/
-#ifdef CONFIG_ARCH_POSIX
-  posix_exit(0);
-#endif
 }

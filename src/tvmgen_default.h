@@ -7,36 +7,16 @@ extern "C" {
 #endif
 
 /*!
- * \brief Input tensor pointers for TVM module "default" 
+ * \brief Workspace size for TVM module "default"
  */
-struct tvmgen_default_inputs {
-  void* dense_4_input;
-};
-
-/*!
- * \brief Output tensor pointers for TVM module "default" 
- */
-struct tvmgen_default_outputs {
-  void* output;
-};
+#define TVMGEN_DEFAULT_WORKSPACE_SIZE 20*1024
 
 /*!
  * \brief entrypoint function for TVM module "default"
  * \param inputs Input tensors for the module 
  * \param outputs Output tensors for the module 
  */
-// int32_t tvmgen_default_run_model(
-//  struct tvmgen_default_inputs* inputs,
-//   struct tvmgen_default_outputs* outputs
-// );
-int32_t tvmgen_default_run_model(
-  float* inputs,
-  float* outputs
-);
-/*!
- * \brief Workspace size for TVM module "default"
- */
-#define TVMGEN_DEFAULT_WORKSPACE_SIZE 20*1024
+int32_t tvmgen_default_run_model(float* inputs, float* outputs);
 
 #ifdef __cplusplus
 }

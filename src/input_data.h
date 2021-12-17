@@ -1,8 +1,4 @@
-#include <stddef.h>
-#include <stdint.h>
-#include <dlpack/dlpack.h>
-// const size_t input_data_len = 10;
-// float input_data[] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, };
+// Sine model input tensor: 1 float
 
-const size_t input_data_len = 1;
-float input_data[] = {1.0,};
+#define INPUT_DATA_LEN 1
+float input_data[INPUT_DATA_LEN] = {1.0,};
