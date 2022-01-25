@@ -17,10 +17,22 @@
  * under the License.
  */
 
+
+#include <version.h>
+#define IS_ZEPHYR_VERSION_GT(major, minor) \
+	(KERNEL_VERSION_MAJOR > (major) || (KERNEL_VERSION_MAJOR == (major) && KERNEL_VERSION_MINOR > (minor)))
+
 #include <assert.h>
 #include <float.h>
 #include <kernel.h>
-#include <power/reboot.h>
+#include <sys/util.h>
+
+#if IS_ZEPHYR_VERSION_GT(2,6)
+# include <sys/reboot.h>
+#else
+# include <power/reboot.h>
+#endif
+
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
